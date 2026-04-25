@@ -9,7 +9,6 @@ INTERACTIVE_GRAPH_HEIGHT = 520
 
 st.set_page_config(layout="wide")
 
-
 # ---------------- SESSION ----------------
 if "graph" not in st.session_state:
     st.session_state.graph = None
@@ -22,8 +21,13 @@ def clean_columns(df):
 
 
 def find_column(df, options):
-    for col in df.columns:
-        for opt in options:
+    # 1. Prioritize exact column matches
+    for opt in options:
+        if opt in df.columns:
+            return opt
+    # 2. Fallback to substring matches
+    for opt in options:
+        for col in df.columns:
             if opt in col:
                 return col
     return None
@@ -54,10 +58,10 @@ def load_resource_sheet_fallback(xls):
 
 
 VIEW_ATTRIBUTE_FIELDS = {
-    "Engineering": [("cost", "Cost")],
+    "Engineering": [("cost", "Cost"), ("time_min", "Time (Min)"), ("difficulty", "Difficulty")],
     "Quality": [("quality_grade", "Quality Grade"), ("quality_check", "Quality Check")],
-    "Sustainability": [("co2", "CO2")],
-    "Reliability": [("mtbf", "MTBF")],
+    "Sustainability": [("co2", "CO2 Impact"), ("energy_level", "Energy Level")],
+    "Reliability": [("mtbf", "MTBF"), ("availability", "Availability")],
 }
 NODE_TYPE_OPTIONS = ["Product", "Process", "Resource"]
 RESERVED_ATTRIBUTE_KEYS = {"id", "name", "type", "source", "target"}
@@ -230,7 +234,8 @@ def find_conflicting_node_index(nodes_df, node_id, node_name, exclude_index):
     return None
 
 
-def apply_view_and_extra_attributes(nodes_df, row_index, view, view_attributes, extra_attributes, clear_blank_view_fields=False):
+def apply_view_and_extra_attributes(nodes_df, row_index, view, view_attributes, extra_attributes,
+                                    clear_blank_view_fields=False):
     for attr_key, _ in VIEW_ATTRIBUTE_FIELDS.get(view, []):
         if attr_key not in nodes_df.columns:
             nodes_df[attr_key] = pd.NA
@@ -317,7 +322,8 @@ def create_or_reuse_node(nodes_df, edges_df, node_id, node_name, node_type, view
     return safe_nodes.reset_index(drop=True), safe_edges.reset_index(drop=True), created_new, None
 
 
-def update_existing_node(nodes_df, edges_df, row_index, node_id, node_name, node_type, view, view_attributes, extra_attributes, clear_blank_view_fields=False):
+def update_existing_node(nodes_df, edges_df, row_index, node_id, node_name, node_type, view, view_attributes,
+                         extra_attributes, clear_blank_view_fields=False):
     safe_nodes = ensure_node_columns(nodes_df)
     safe_edges = ensure_edge_columns(edges_df)
     if int(row_index) not in set(safe_nodes.index.tolist()):
@@ -415,179 +421,126 @@ def render_view_attribute_inputs(view, key_prefix, defaults=None):
     return values
 
 
-def render_graph_crud_sidebar(view):
+def render_crud_main_page(view):
     if "nodes_df" not in st.session_state:
         return
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Graph CRUD")
-    st.sidebar.caption("Create, update, and delete nodes/edges. View attributes are saved only for the active view.")
 
     nodes_df = ensure_node_columns(st.session_state.nodes_df)
     edges_df = ensure_edge_columns(st.session_state.edges_df if "edges_df" in st.session_state else pd.DataFrame())
 
-    with st.sidebar.expander("Create / Reuse Node", expanded=False):
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["➕ Create Node", "✏️ Update Node", "🗑️ Delete Node", "🔗 Add Edge", "✂️ Delete Edge"])
+
+    with tab1:
+        st.subheader("Create or Reuse Node")
         with st.form("create_reuse_node_form", clear_on_submit=True):
             node_type = st.selectbox("Assign Type", NODE_TYPE_OPTIONS, key="create_node_type")
             node_id = st.text_input("Node ID", key="create_node_id")
             node_name = st.text_input("Node Name", key="create_node_name")
             st.caption(f"{view} attributes")
             view_attributes = render_view_attribute_inputs(view, key_prefix=f"create_{view.lower()}")
-            extra_json = st.text_area(
-                "Extra attributes JSON (optional)",
-                key="create_extra_json",
-                placeholder='{"supplier": "ACME", "priority": "high"}',
-            )
+            extra_json = st.text_area("Extra attributes JSON (optional)", key="create_extra_json",
+                                      placeholder='{"supplier": "ACME"}')
             create_submit = st.form_submit_button("Save Node")
 
         if create_submit:
             extra_attributes, parse_error = parse_extra_attributes_json(extra_json)
             if parse_error:
-                st.sidebar.error(parse_error)
+                st.error(parse_error)
             else:
                 new_nodes, new_edges, created_new, op_error = create_or_reuse_node(
-                    nodes_df,
-                    edges_df,
-                    node_id=node_id,
-                    node_name=node_name,
-                    node_type=node_type,
-                    view=view,
-                    view_attributes=view_attributes,
-                    extra_attributes=extra_attributes,
+                    nodes_df, edges_df, node_id, node_name, node_type, view, view_attributes, extra_attributes
                 )
                 if op_error:
-                    st.sidebar.error(op_error)
+                    st.error(op_error)
                 else:
                     st.session_state.nodes_df = new_nodes
                     st.session_state.edges_df = new_edges
-                    st.sidebar.success("Node created." if created_new else "Existing node updated for this view.")
+                    st.success("Node created." if created_new else "Existing node updated for this view.")
                     st.rerun()
 
-    with st.sidebar.expander("Update Existing Node", expanded=False):
+    with tab2:
+        st.subheader("Update Existing Node")
         if nodes_df.empty:
             st.info("No nodes available.")
         else:
             selectable_indices = list(nodes_df.index)
-            selected_index = st.selectbox(
-                "Select Node",
-                options=selectable_indices,
-                format_func=lambda idx: format_node_label_from_row(nodes_df.loc[idx]),
-                key="update_node_select",
-            )
+            selected_index = st.selectbox("Select Node", options=selectable_indices,
+                                          format_func=lambda idx: format_node_label_from_row(nodes_df.loc[idx]),
+                                          key="update_node_select")
             selected_row = nodes_df.loc[selected_index]
             current_type = str(selected_row.get("type", "Resource")).strip().title()
-            if current_type not in NODE_TYPE_OPTIONS:
-                current_type = "Resource"
+            if current_type not in NODE_TYPE_OPTIONS: current_type = "Resource"
             current_view_defaults = {key: selected_row.get(key) for key, _ in VIEW_ATTRIBUTE_FIELDS.get(view, [])}
 
             with st.form(f"update_node_form_{selected_index}", clear_on_submit=False):
-                node_type = st.selectbox(
-                    "Assign Type",
-                    NODE_TYPE_OPTIONS,
-                    index=NODE_TYPE_OPTIONS.index(current_type),
-                    key=f"update_node_type_{selected_index}",
-                )
-                node_id = st.text_input(
-                    "Node ID",
-                    value="" if pd.isna(selected_row.get("id")) else str(selected_row.get("id")),
-                    key=f"update_node_id_{selected_index}",
-                )
-                node_name = st.text_input(
-                    "Node Name",
-                    value="" if pd.isna(selected_row.get("name")) else str(selected_row.get("name")),
-                    key=f"update_node_name_{selected_index}",
-                )
+                node_type = st.selectbox("Assign Type", NODE_TYPE_OPTIONS, index=NODE_TYPE_OPTIONS.index(current_type),
+                                         key=f"upd_type_{selected_index}")
+                node_id = st.text_input("Node ID",
+                                        value="" if pd.isna(selected_row.get("id")) else str(selected_row.get("id")),
+                                        key=f"upd_id_{selected_index}")
+                node_name = st.text_input("Node Name", value="" if pd.isna(selected_row.get("name")) else str(
+                    selected_row.get("name")), key=f"upd_name_{selected_index}")
                 st.caption(f"{view} attributes")
-                view_attributes = render_view_attribute_inputs(
-                    view,
-                    key_prefix=f"update_{selected_index}_{view.lower()}",
-                    defaults=current_view_defaults,
-                )
-                clear_blank_view_fields = st.checkbox(
-                    "Clear blank fields for this view",
-                    value=False,
-                    key=f"update_clear_blank_{selected_index}_{view.lower()}",
-                )
-                extra_json = st.text_area(
-                    "Extra attributes JSON (optional)",
-                    value="",
-                    key=f"update_extra_json_{selected_index}",
-                    placeholder='{"line": "B2"}',
-                )
+                view_attributes = render_view_attribute_inputs(view, key_prefix=f"upd_{selected_index}_{view.lower()}",
+                                                               defaults=current_view_defaults)
+                clear_blank = st.checkbox("Clear blank fields for this view", value=False,
+                                          key=f"upd_clear_{selected_index}")
+                extra_json = st.text_area("Extra attributes JSON (optional)", value="",
+                                          key=f"upd_json_{selected_index}")
                 update_submit = st.form_submit_button("Apply Update")
 
             if update_submit:
                 extra_attributes, parse_error = parse_extra_attributes_json(extra_json)
                 if parse_error:
-                    st.sidebar.error(parse_error)
+                    st.error(parse_error)
                 else:
                     new_nodes, new_edges, op_error = update_existing_node(
-                        nodes_df,
-                        edges_df,
-                        row_index=selected_index,
-                        node_id=node_id,
-                        node_name=node_name,
-                        node_type=node_type,
-                        view=view,
-                        view_attributes=view_attributes,
-                        extra_attributes=extra_attributes,
-                        clear_blank_view_fields=clear_blank_view_fields,
+                        nodes_df, edges_df, selected_index, node_id, node_name, node_type, view, view_attributes,
+                        extra_attributes, clear_blank
                     )
                     if op_error:
-                        st.sidebar.error(op_error)
+                        st.error(op_error)
                     else:
                         st.session_state.nodes_df = new_nodes
                         st.session_state.edges_df = new_edges
-                        st.sidebar.success("Node updated.")
+                        st.success("Node updated.")
                         st.rerun()
 
-    with st.sidebar.expander("Delete Node (+ related edges)", expanded=False):
+    with tab3:
+        st.subheader("Delete Node")
         if nodes_df.empty:
             st.info("No nodes available.")
         else:
             with st.form("delete_node_form"):
-                selectable_indices = list(nodes_df.index)
-                selected_index = st.selectbox(
-                    "Node to delete",
-                    options=selectable_indices,
-                    format_func=lambda idx: format_node_label_from_row(nodes_df.loc[idx]),
-                    key="delete_node_select",
-                )
+                selected_index = st.selectbox("Node to delete", options=list(nodes_df.index),
+                                              format_func=lambda idx: format_node_label_from_row(nodes_df.loc[idx]))
                 confirm_delete = st.checkbox("I understand this also removes connected edges", value=False)
                 delete_submit = st.form_submit_button("Delete Node")
 
             if delete_submit:
                 if not confirm_delete:
-                    st.sidebar.warning("Please confirm deletion first.")
+                    st.warning("Please confirm deletion first.")
                 else:
                     new_nodes, new_edges, op_error = delete_node_and_related_edges(nodes_df, edges_df, selected_index)
                     if op_error:
-                        st.sidebar.error(op_error)
+                        st.error(op_error)
                     else:
                         st.session_state.nodes_df = new_nodes
                         st.session_state.edges_df = new_edges
-                        st.sidebar.success("Node and connected edges deleted.")
+                        st.success("Node and connected edges deleted.")
                         st.rerun()
 
-    with st.sidebar.expander("Create Edge", expanded=False):
+    with tab4:
+        st.subheader("Create Edge")
         if len(nodes_df.index) < 2:
             st.info("At least two nodes are required.")
         else:
-            selectable_indices = list(nodes_df.index)
             with st.form("create_edge_form"):
-                source_index = st.selectbox(
-                    "Source Node",
-                    options=selectable_indices,
-                    format_func=lambda idx: format_node_label_from_row(nodes_df.loc[idx]),
-                    key="create_edge_source",
-                )
-                target_index = st.selectbox(
-                    "Target Node",
-                    options=selectable_indices,
-                    index=1 if len(selectable_indices) > 1 else 0,
-                    format_func=lambda idx: format_node_label_from_row(nodes_df.loc[idx]),
-                    key="create_edge_target",
-                )
+                source_index = st.selectbox("Source Node", options=list(nodes_df.index),
+                                            format_func=lambda idx: format_node_label_from_row(nodes_df.loc[idx]))
+                target_index = st.selectbox("Target Node", options=list(nodes_df.index), index=1,
+                                            format_func=lambda idx: format_node_label_from_row(nodes_df.loc[idx]))
                 edge_submit = st.form_submit_button("Add Edge")
 
             if edge_submit:
@@ -595,55 +548,51 @@ def render_graph_crud_sidebar(view):
                 target_alias = node_primary_alias_from_row(nodes_df.loc[target_index])
                 new_edges, op_error = add_edge_relation(edges_df, source_alias, target_alias)
                 if op_error:
-                    st.sidebar.error(op_error)
+                    st.error(op_error)
                 else:
                     st.session_state.edges_df = new_edges
-                    st.sidebar.success("Edge added.")
+                    st.success("Edge added.")
                     st.rerun()
 
-    with st.sidebar.expander("Delete Edge", expanded=False):
+    with tab5:
+        st.subheader("Delete Edge")
         if edges_df.empty:
             st.info("No edges available.")
         else:
-            edge_indices = list(edges_df.index)
             with st.form("delete_edges_form"):
-                selected_edges = st.multiselect(
-                    "Edges to delete",
-                    options=edge_indices,
-                    format_func=lambda idx: f"{edges_df.loc[idx, 'source']} -> {edges_df.loc[idx, 'target']}",
-                    key="delete_edges_multiselect",
-                )
+                selected_edges = st.multiselect("Edges to delete", options=list(edges_df.index), format_func=lambda
+                    idx: f"{edges_df.loc[idx, 'source']} -> {edges_df.loc[idx, 'target']}")
                 delete_edges_submit = st.form_submit_button("Delete Selected Edges")
 
             if delete_edges_submit:
                 if not selected_edges:
-                    st.sidebar.warning("Select at least one edge.")
+                    st.warning("Select at least one edge.")
                 else:
                     st.session_state.edges_df = delete_edges_by_indices(edges_df, selected_edges)
-                    st.sidebar.success("Selected edges deleted.")
+                    st.success("Selected edges deleted.")
                     st.rerun()
-
-
 
 
 def build_label(row, view):
     name = str(row.get("name", "Unknown"))
     label = name
 
-    if view == "Engineering" and pd.notna(row.get("cost")):
-        label += f"\nCost: {row.get('cost')}"
+    if view == "Engineering":
+        if pd.notna(row.get("cost")): label += f"\nCost: {row.get('cost')}"
+        if pd.notna(row.get("time_min")): label += f"\nTime: {row.get('time_min')}m"
+        if pd.notna(row.get("difficulty")): label += f"\nDiff: {row.get('difficulty')}"
 
     elif view == "Quality":
-        if pd.notna(row.get("quality_grade")):
-            label += f"\nQuality: {row.get('quality_grade')}"
-        if pd.notna(row.get("quality_check")):
-            label += f"\nQuality Check: {row.get('quality_check')}"
+        if pd.notna(row.get("quality_grade")): label += f"\nQ-Grade: {row.get('quality_grade')}"
+        if pd.notna(row.get("quality_check")): label += f"\nQ-Check: {row.get('quality_check')}"
 
-    elif view == "Sustainability" and pd.notna(row.get("co2")):
-        label += f"\nCO2: {row.get('co2')}"
+    elif view == "Sustainability":
+        if pd.notna(row.get("co2")): label += f"\nCO2: {row.get('co2')}"
+        if pd.notna(row.get("energy_level")): label += f"\nEnergy: {row.get('energy_level')}"
 
-    elif view == "Reliability" and pd.notna(row.get("mtbf")):
-        label += f"\nMTBF: {row.get('mtbf')}"
+    elif view == "Reliability":
+        if pd.notna(row.get("mtbf")): label += f"\nMTBF: {row.get('mtbf')}"
+        if pd.notna(row.get("availability")): label += f"\nAvail: {row.get('availability')}"
 
     return label
 
@@ -866,10 +815,139 @@ def build_interactive_graph_html(nodes_df, edges_df, view, height=INTERACTIVE_GR
     )
 
 
+def build_networkx_graph():
+    """Converts the session state DataFrames into a NetworkX DiGraph."""
+    G = nx.DiGraph()
+    if "nodes_df" not in st.session_state or st.session_state.nodes_df.empty:
+        return G
+
+    alias_to_key = {}
+
+    # 1. Add Nodes and build the Alias Dictionary
+    for _, row in st.session_state.nodes_df.iterrows():
+        raw_id = str(row.get("id", "")).strip().lower()
+        raw_name = str(row.get("name", "")).strip().lower()
+
+        # Primary key is ID, fallback is Name
+        node_key = raw_id if raw_id and raw_id != "nan" else raw_name
+        if not node_key or node_key == "nan":
+            continue
+
+        # Map both the ID and the Name to the exact same core Node Key
+        alias_to_key[raw_id] = node_key
+        alias_to_key[raw_name] = node_key
+
+        attr_dict = row.dropna().to_dict()
+        G.add_node(node_key, **attr_dict)
+
+    # 2. Add Edges using the mapped keys
+    if "edges_df" in st.session_state and not st.session_state.edges_df.empty:
+        for _, row in st.session_state.edges_df.iterrows():
+            src_raw = str(row.get("source", "")).strip().lower()
+            tgt_raw = str(row.get("target", "")).strip().lower()
+
+            # Translate the Excel edge text into the core Node Key
+            src = alias_to_key.get(src_raw, src_raw)
+            tgt = alias_to_key.get(tgt_raw, tgt_raw)
+
+            if src and tgt and src != "nan" and tgt != "nan":
+                # Safety fallback: If edge exists but node wasn't in nodes_df
+                if src not in G: G.add_node(src, name=src_raw.title(), type="Unknown")
+                if tgt not in G: G.add_node(tgt, name=tgt_raw.title(), type="Unknown")
+
+                G.add_edge(src, tgt)
+
+    return G
+
+
+# --- Task 6a: Custom Car Requirement ---
+def check_process_resource_assignment(G):
+    """
+    Requirement Check: Every 'Process' node MUST have an incoming edge
+    from a 'Resource' node. (You can't assemble a car without a tool/worker).
+    """
+    violations = []
+    for node, data in G.nodes(data=True):
+        if str(data.get("type", "")).lower() == "process":
+            # Check predecessors (incoming edges)
+            has_resource = False
+            for pred in G.predecessors(node):
+                if str(G.nodes[pred].get("type", "")).lower() == "resource":
+                    has_resource = True
+                    break
+            if not has_resource:
+                violations.append(data.get("name", node))
+    return violations
+
+
+# --- Task 6b: View-Specific Dependencies ---
+def analyze_downstream_quality_impact(G, start_node_name):
+    """
+    View Dependency: If a specific process or product fails a 'Quality' check,
+    what downstream products are affected? Uses Graph Reachability (Paths).
+    """
+    # Find node ID from name
+    start_node = None
+    for n, d in G.nodes(data=True):
+        if str(d.get("name", "")).lower() == str(start_node_name).lower():
+            start_node = n
+            break
+
+    if not start_node or start_node not in G:
+        return []
+
+    # Find all nodes reachable from the start node (downstream dependencies)
+    reachable = list(nx.descendants(G, start_node))
+    affected_items = [G.nodes[n].get("name", n) for n in reachable]
+    return affected_items
+
+
+# --- Task 6c: Identify Similarly Structured Elements ---
+def find_similarly_structured_processes(G):
+    """
+    Identifies processes that require the exact same number of inputs
+    and produce the exact same number of outputs (Structural similarity).
+    """
+    process_signatures = {}
+    for node, data in G.nodes(data=True):
+        if str(data.get("type", "")).lower() == "process":
+            in_degree = G.in_degree(node)
+            out_degree = G.out_degree(node)
+            sig = f"{in_degree}_in_{out_degree}_out"
+
+            if sig not in process_signatures:
+                process_signatures[sig] = []
+            process_signatures[sig].append(data.get("name", node))
+
+    # Filter for signatures that have more than 1 matching process
+    similar_groups = {sig: nodes for sig, nodes in process_signatures.items() if len(nodes) > 1}
+    return similar_groups
+
+
+# --- Task 6d: Identification of Disconnected Segments ---
+def find_disconnected_segments(G):
+    """
+    Uses Weakly Connected Components to find isolated islands in the graph.
+    """
+    components = list(nx.weakly_connected_components(G))
+    if len(components) <= 1:
+        return []  # Graph is fully connected
+
+    # Sort by size so the largest component (the main assembly line) is first
+    sorted_comps = sorted(components, key=len, reverse=True)
+
+    isolated_segments = []
+    # Skip [0] because we do not want to report the main graph as an orphan!
+    for comp in sorted_comps[1:]:
+        names = [G.nodes[n].get("name", n) for n in comp]
+        isolated_segments.append(names)
+    return isolated_segments
+
+
 # ---------------- GRAPH ----------------
 def build_graphviz(nodes_df, edges_df, view):
     dot = graphviz.Digraph()
-    dot.attr(rankdir="TB", splines="ortho", ranksep="1.5", nodesep="0.8", newrank="true")
+    dot.attr(rankdir="TB", splines="polyline", ranksep="1.5", nodesep="0.8", newrank="true")
 
     local_nodes = ensure_node_columns(nodes_df)
     local_edges = ensure_edge_columns(edges_df)
@@ -918,71 +996,74 @@ def build_graphviz(nodes_df, edges_df, view):
     # PRODUCTS
     with dot.subgraph(name="products_rank") as s:
         s.attr(rank="same")
-        products_sorted = products.sort_values("name") if "name" in products.columns else products.sort_values("node_key")
+        products_sorted = products.sort_values("name") if "name" in products.columns else products.sort_values(
+            "node_key")
         for _, row in products_sorted.iterrows():
             node_id = str(row.get("node_key", "")).strip().lower()
             if not node_id or node_id == "nan":
                 continue
             product_ids.append(node_id)
             s.node(
-                node_id,
+                str(node_id),
                 label=build_label(row, view),
                 shape="box",
                 style="filled,rounded",
-                fillcolor="red"
+                fillcolor="#fecaca"
             )
 
     # PROCESSES
     with dot.subgraph(name="processes_rank") as s:
         s.attr(rank="same")
-        processes_sorted = processes.sort_values("name") if "name" in processes.columns else processes.sort_values("node_key")
+        processes_sorted = processes.sort_values("name") if "name" in processes.columns else processes.sort_values(
+            "node_key")
         for _, row in processes_sorted.iterrows():
             node_id = str(row.get("node_key", "")).strip().lower()
             if not node_id or node_id == "nan":
                 continue
             process_ids.append(node_id)
             s.node(
-                node_id,
+                str(node_id),
                 label=build_label(row, view),
                 shape="box",
                 style="filled,rounded",
-                fillcolor="orange"
+                fillcolor="#fed7aa"
             )
 
     # RESOURCES
     with dot.subgraph(name="resources_rank") as s:
         s.attr(rank="same")
-        resources_sorted = resources.sort_values("name") if "name" in resources.columns else resources.sort_values("node_key")
+        resources_sorted = resources.sort_values("name") if "name" in resources.columns else resources.sort_values(
+            "node_key")
         for _, row in resources_sorted.iterrows():
             node_id = str(row.get("node_key", "")).strip().lower()
             if not node_id or node_id == "nan":
                 continue
             resource_ids.append(node_id)
             s.node(
-                node_id,
+                str(node_id),
                 label=build_label(row, view),
                 shape="box",
                 style="filled,rounded",
-                fillcolor="green"
+                fillcolor="#bbf7d0"
             )
 
     # Keep a strict left->right order inside each row.
     for ids in [product_ids, process_ids, resource_ids]:
         for i in range(len(ids) - 1):
-            dot.edge(ids[i], ids[i + 1], style="invis", weight="100")
+            dot.edge(str(ids[i]), str(ids[i + 1]), style="invis", weight="100")
 
     # Force top-to-bottom row stacking: Products -> Processes -> Resources.
     if product_ids and process_ids:
-        dot.edge(product_ids[0], process_ids[0], style="invis", weight="200")
+        dot.edge(str(product_ids[0]), str(process_ids[0]), style="invis", weight="200")
     if process_ids and resource_ids:
-        dot.edge(process_ids[0], resource_ids[0], style="invis", weight="200")
+        dot.edge(str(process_ids[0]), str(resource_ids[0]), style="invis", weight="200")
 
     # EDGES
     for _, row in local_edges.iterrows():
         source = alias_to_key.get(row.get("source", ""))
         target = alias_to_key.get(row.get("target", ""))
         if source in known_keys and target in known_keys:
-            dot.edge(source, target, constraint="false")
+            dot.edge(str(source), str(target), constraint="false")
 
     return dot
 
@@ -1041,8 +1122,6 @@ def graph_tab():
         ["Engineering", "Quality", "Sustainability", "Reliability"]
     )
 
-    render_graph_crud_sidebar(view)
-
     render_mode = st.selectbox(
         "Graph Mode",
         ["Interactive (drag nodes)", "Static (current Graphviz)"]
@@ -1062,7 +1141,10 @@ def graph_tab():
             st.session_state.edges_df,
             view
         )
-        st.graphviz_chart(dot, use_container_width=True)
+        try:
+            st.graphviz_chart(dot, use_container_width=True)
+        except Exception as e:
+            st.error(f"Graphviz Rendering Engine Failed: {e}")
 
     # ---- TABLE ----
     st.subheader("Extracted Attributes")
@@ -1070,50 +1152,177 @@ def graph_tab():
     df = st.session_state.nodes_df.copy()
 
     if view == "Engineering":
-        cols = [c for c in ["name", "cost"] if c in df.columns]
-        df = df[cols] if cols else pd.DataFrame()
-
+        target_cols = ["name", "type", "cost", "time_min", "difficulty"]
     elif view == "Quality":
-        quality_cols = [c for c in ["quality_grade", "quality_check"] if c in df.columns]
-        cols = [c for c in ["name"] + quality_cols if c in df.columns]
-        df = df[cols] if cols else pd.DataFrame()
-
+        target_cols = ["name", "type", "quality_grade", "quality_check"]
     elif view == "Sustainability":
-        cols = [c for c in ["name", "co2"] if c in df.columns]
-        df = df[cols] if cols else pd.DataFrame()
-
+        target_cols = ["name", "type", "co2", "energy_level"]
     elif view == "Reliability":
-        cols = [c for c in ["name", "mtbf"] if c in df.columns]
-        df = df[cols] if cols else pd.DataFrame()
+        target_cols = ["name", "type", "mtbf", "availability"]
+    else:
+        target_cols = ["name", "type"]
 
-    st.dataframe(df, height=170)
+    for col in target_cols:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    st.dataframe(df[target_cols], height=170, use_container_width=True)
+
+
+# TASK 6 - Visualize
+# TASK 6 - Visualize
+def build_diagnostic_tree(G, violations_req, disconnected_req, impact_req=None):
+    """
+    Builds TWO highly organized Graphviz trees highlighting system issues.
+    Separates orphans into a completely separate graph object so they can be rendered side-by-side.
+    """
+    # 1. Main Graph (Top-to-Bottom layout)
+    dot_main = graphviz.Digraph(engine="dot")
+    dot_main.attr(rankdir="TB", splines="polyline", nodesep="0.3", ranksep="0.4")
+
+    # 2. Orphan Graph (Top-to-Bottom layout to stack vertically in a side column)
+    dot_iso = graphviz.Digraph(engine="dot")
+    dot_iso.attr(rankdir="TB", nodesep="0.2", ranksep="0.2")
+
+    isolated_names = []
+    for comp in disconnected_req:
+        isolated_names.extend(comp)
+
+    isolated_nodes = []
+    main_nodes = []
+    for n, data in G.nodes(data=True):
+        raw_name = data.get("name", n)
+        if raw_name in isolated_names or n in isolated_names:
+            isolated_nodes.append(n)
+        else:
+            main_nodes.append(n)
+
+    def add_styled_node(subgraph, node_id, is_orphan=False):
+        data = G.nodes[node_id]
+        raw_name = data.get("name", node_id)
+        name = str(raw_name).title()
+        node_type = str(data.get("type", "")).title()
+
+        if is_orphan:
+            # Force orphan styling
+            fillcolor, color, fontcolor, penwidth = "#fef08a", "#eab308", "#854d0e", "2"
+        else:
+            # Normal styling & Failure states
+            fillcolor, color, fontcolor, penwidth = "#f8fafc", "#cbd5e1", "#334155", "1"
+            if raw_name in violations_req or node_id in violations_req:
+                fillcolor, color, fontcolor, penwidth = "#fee2e2", "#dc2626", "#991b1b", "3"
+            elif impact_req and (raw_name in impact_req or node_id in impact_req):
+                fillcolor, color, fontcolor, penwidth = "#ffedd5", "#ea580c", "#9a3412", "2"
+
+        label = f"{name}\n[{node_type}]"
+        subgraph.node(str(node_id), label=label, shape="box", style="filled,rounded",
+                      fillcolor=fillcolor, color=color, fontcolor=fontcolor,
+                      penwidth=penwidth, fontname="Helvetica", fontsize="10", margin="0.05,0.05")
+
+    # --- BUILD MAIN GRAPH ---
+    prods = [n for n in main_nodes if str(G.nodes[n].get("type", "")).lower() == "product"]
+    procs = [n for n in main_nodes if str(G.nodes[n].get("type", "")).lower() == "process"]
+    res = [n for n in main_nodes if str(G.nodes[n].get("type", "")).lower() == "resource"]
+
+    with dot_main.subgraph(name="rank_res") as s:
+        s.attr(rank="same")
+        for n in res: add_styled_node(s, n)
+
+    with dot_main.subgraph(name="rank_procs") as s:
+        s.attr(rank="same")
+        for n in procs: add_styled_node(s, n)
+
+    with dot_main.subgraph(name="rank_prods") as s:
+        s.attr(rank="same")
+        for n in prods: add_styled_node(s, n)
+
+    for n in main_nodes:
+        if n not in prods and n not in procs and n not in res:
+            add_styled_node(dot_main, n)
+
+    if res and procs:
+        dot_main.edge(str(res[0]), str(procs[0]), style="invis", weight="200")
+    if procs and prods:
+        dot_main.edge(str(procs[0]), str(prods[0]), style="invis", weight="200")
+
+    for src, tgt in G.edges():
+        dot_main.edge(str(src), str(tgt), color="#94a3b8", arrowsize="0.6")
+
+    # --- BUILD ORPHAN GRAPH ---
+    if isolated_nodes:
+        with dot_iso.subgraph(name="cluster_isolated") as c_iso:
+            c_iso.attr(label="Orphaned Elements", style="dashed,rounded",
+                       color="#ca8a04", fontcolor="#854d0e", bgcolor="#fef9c3")
+            # We skip 'rank="same"' here so they stack nicely in a vertical column
+            for n in isolated_nodes:
+                add_styled_node(c_iso, n, is_orphan=True)
+
+    # Return both graphs!
+    return dot_main, dot_iso
+
+# --- Graph Semantic Auto-Healer ---
+def auto_heal_graph(G):
+    H = G.copy()
+    edges_to_add = []
+    edges_to_remove = []
+
+    for u, v in H.edges():
+        u_type = str(H.nodes[u].get("type", "")).lower()
+        v_type = str(H.nodes[v].get("type", "")).lower()
+
+        # Detect flawed mapping: Product -> Resource
+        if u_type == "product" and v_type == "resource":
+            for pred in H.predecessors(u):
+                if str(H.nodes[pred].get("type", "")).lower() == "process":
+                    edges_to_add.append((v, pred))
+                    edges_to_remove.append((u, v))
+
+    H.remove_edges_from(edges_to_remove)
+    H.add_edges_from(edges_to_add)
+    return H
 
 
 # ---------------- UI ----------------
 page = st.sidebar.selectbox(
     "Go to",
-    ["Home", "Input Data", "Graph View"]
+    ["Home & Data Input", "Edit Model (CRUD)", "Graph View", "Analysis Report"]
 )
 
+# ---------------- HOME & DATA INPUT ----------------
+if page == "Home & Data Input":
+    st.header("PPR Management Dashboard 🏠")
 
-# ---------------- HOME ----------------
-if page == "Home":
-    st.header("Home")
-
-    if "nodes_df" in st.session_state:
+    # 1. KPI Dashboard Segment
+    if "nodes_df" in st.session_state and not st.session_state.nodes_df.empty:
         df = st.session_state.nodes_df
-        type_series = df["type"].astype(str).str.strip().str.lower() if "type" in df.columns else pd.Series([], dtype=str)
+        type_series = df["type"].astype(str).str.strip().str.lower() if "type" in df.columns else pd.Series([],
+                                                                                                            dtype=str)
 
+        st.subheader("System Overview")
         col1, col2, col3 = st.columns(3)
-        col1.metric("Products", int((type_series == "product").sum()))
-        col2.metric("Processes", int((type_series == "process").sum()))
-        col3.metric("Resources", int((type_series == "resource").sum()))
+        col1.metric("📦 Total Products", int((type_series == "product").sum()))
+        col2.metric("⚙️ Total Processes", int((type_series == "process").sum()))
+        col3.metric("🛠️ Total Resources", int((type_series == "resource").sum()))
 
+        st.divider()
+        st.subheader("Key Performance Indicators (KPIs)")
 
-# ---------------- INPUT ----------------
-elif page == "Input Data":
-    st.header("Upload Excel")
+        total_cost = pd.to_numeric(df.get("cost", pd.Series()), errors="coerce").sum()
+        total_time = pd.to_numeric(df.get("time_min", pd.Series()), errors="coerce").sum()
+        total_co2 = pd.to_numeric(df.get("co2", pd.Series()), errors="coerce").sum()
 
+        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi1.metric("💰 Total System Cost", f"${total_cost:,.2f}")
+        kpi2.metric("⏱️ Total Prod. Time", f"{total_time:,.1f} mins")
+        kpi3.metric("🌱 Est. CO2 Footprint", f"{total_co2:,.2f} kg")
+
+    else:
+        st.info("👋 Welcome! Please upload your PPR Excel file below to generate your dashboard.")
+
+    st.divider()
+
+    # 2. Upload Segment
+    st.header("Upload Excel Data")
     file = st.file_uploader("Upload your PPR model", type=["xlsx"])
 
     if file:
@@ -1151,41 +1360,40 @@ elif page == "Input Data":
 
             # ---- Products ----
             for _, r in df_products.iterrows():
-                nodes.append({
-                    "id": r.get("product id", r.get("product name")),
-                    "name": r.get("product", r.get("product name")),
-                    "type": "Product",
-                    **r
-                })
+                nodes.append(
+                    {"id": r.get("product id", r.get("product name")), "name": r.get("product", r.get("product name")),
+                     "type": "Product", **r})
 
             # ---- Processes ----
             if df_processes is not None:
                 for _, r in df_processes.iterrows():
-                    nodes.append({
-                        "id": r.get("process id", r.get("process name")),
-                        "name": r.get("process", r.get("process name")),
-                        "type": "Process",
-                        **r
-                    })
+                    nodes.append({"id": r.get("process id", r.get("process name")),
+                                  "name": r.get("process", r.get("process name")), "type": "Process", **r})
 
             # ---- Resources ----
             if df_resources is not None:
                 resource_id_col = find_column(df_resources, ["resource id", "resource_id", "id"])
-                resource_name_col = find_column(df_resources, ["resource name", "resource_name", "resource", "name"])
+                resource_name_col = find_column(df_resources, ["resource name", "resource_name"])
+
                 for _, r in df_resources.iterrows():
                     resource_id = r.get(resource_id_col) if resource_id_col else None
                     resource_name = r.get(resource_name_col) if resource_name_col else None
-                    if pd.isna(resource_id) and pd.isna(resource_name):
-                        continue
+                    if pd.isna(resource_id) and pd.isna(resource_name): continue
+
+                    # Safely extract the data without overriding the core 'type'
+                    row_data = r.dropna().to_dict()
+                    excel_type = row_data.pop("type", "Resource")
+
                     nodes.append({
                         "id": resource_id if pd.notna(resource_id) else resource_name,
                         "name": resource_name if pd.notna(resource_name) else resource_id,
                         "type": "Resource",
-                        **r
+                        "resource_category": excel_type,
+                        **row_data
                     })
 
+            # ---- Edges Mapping ---- (This is what accidentally got deleted!)
             edges = []
-
             src = find_column(df_mapping, ["source", "from"])
             tgt = find_column(df_mapping, ["target", "to"])
             if src is None or tgt is None:
@@ -1193,21 +1401,16 @@ elif page == "Input Data":
                 st.stop()
 
             for _, r in df_mapping.iterrows():
-                s_raw = r[src]
-                t_raw = r[tgt]
+                s_raw, t_raw = r[src], r[tgt]
                 if pd.notna(s_raw) and pd.notna(t_raw):
-                    s = str(s_raw).strip().lower()
-                    t = str(t_raw).strip().lower()
-                    if not s or not t or s == "nan" or t == "nan":
-                        continue
+                    s, t = str(s_raw).strip().lower(), str(t_raw).strip().lower()
+                    if not s or not t or s == "nan" or t == "nan": continue
                     edges.append({"source": s, "target": t})
 
-            # Fallback: infer missing resource nodes from edge endpoints not present in known node aliases.
-            known_aliases = set()
-            for n in nodes:
-                known_aliases.add(str(n.get("id", "")).strip().lower())
-                known_aliases.add(str(n.get("name", "")).strip().lower())
-            for endpoint in set([e["source"] for e in edges] + [e["target"] for e in edges]):
+            # Fallback for missing resources
+            known_aliases = {str(n.get("id", "")).strip().lower() for n in nodes} | {
+                str(n.get("name", "")).strip().lower() for n in nodes}
+            for endpoint in {e["source"] for e in edges} | {e["target"] for e in edges}:
                 ep = str(endpoint).strip().lower()
                 if ep and ep != "nan" and ep not in known_aliases:
                     nodes.append({"id": ep, "name": ep, "type": "Resource"})
@@ -1215,18 +1418,134 @@ elif page == "Input Data":
 
             st.session_state.nodes_df = ensure_node_columns(pd.DataFrame(nodes))
             st.session_state.edges_df = ensure_edge_columns(pd.DataFrame(edges, columns=["source", "target"]))
-            st.caption(f"Sheets detected: {', '.join(sheet_names)} | Resource rows loaded: {0 if df_resources is None else len(df_resources)}")
-            if df_resources is None:
-                st.warning("No resource sheet detected. Resource nodes count may be 0.")
-            else:
-                st.info(f"Loaded resources: {len(df_resources)}")
+            st.success("Data loaded successfully! 🚀 Dashboard KPIs are now populated at the top.")
 
-            st.success("Data loaded successfully")
+            if st.button("Refresh Dashboard"):
+                st.rerun()
 
         except Exception as e:
             st.error(e)
+
+# ---------------- EDIT MODEL (CRUD) ----------------
+elif page == "Edit Model (CRUD)":
+    st.header("Modify PPR Model")
+    if "nodes_df" not in st.session_state or st.session_state.nodes_df.empty:
+        st.warning("Please load data in the 'Home & Data Input' tab first.")
+        st.stop()
+
+    view = st.selectbox("Select View Context (for editing specific attributes)",
+                        ["Engineering", "Quality", "Sustainability", "Reliability"])
+    st.markdown("---")
+    render_crud_main_page(view)
 
 
 # ---------------- GRAPH VIEW ----------------
 elif page == "Graph View":
     graph_tab()
+
+# ---------------- ANALYSIS REPORT ----------------
+elif page == "Analysis Report":
+    st.header("Diagnostic Dashboard & Requirement Analysis")
+
+    if "nodes_df" not in st.session_state or st.session_state.nodes_df is None or st.session_state.nodes_df.empty:
+        st.warning("Please load data in the 'Home & Data Input' tab first.")
+        st.stop()
+
+    G = build_networkx_graph()
+
+    # --- AUTO-HEAL TOGGLE ---
+    st.markdown("---")
+    col_t1, col_t2 = st.columns([3, 1])
+    with col_t1:
+        st.write("**Graph Semantic Auto-Healer**")
+        st.caption(
+            "Detects logical errors in Excel mapping (e.g., connecting a Resource to a Product instead of a Process) and dynamically rewires the graph topology.")
+    with col_t2:
+        heal_toggle = st.checkbox("⚙️ Activate Auto-Heal", value=False)
+
+    if heal_toggle:
+        G = auto_heal_graph(G)
+        st.success("Graph topology successfully healed! Check the diagnostic updates below.")
+
+    violations_req = check_process_resource_assignment(G)
+    disconnected_req = find_disconnected_segments(G)
+
+    node_names = sorted([str(d.get("name", n)).title() for n, d in G.nodes(data=True)])
+
+    st.subheader("Simulate Failure (Downstream Impact)")
+    selected_fail = st.selectbox("Select a node to simulate a quality failure:", ["-- None --"] + node_names)
+
+    impact_req = []
+    if selected_fail != "-- None --":
+        impact_req = analyze_downstream_quality_impact(G, selected_fail)
+
+    st.divider()
+
+    st.subheader("System Health Overview (Visual Tree)")
+    st.markdown(
+        "**Legend:** 🔴 **Red:** Process missing Resource | 🟡 **Yellow:** Disconnected Segment | 🟠 **Orange:** Downstream Impact | ⚪ **Grey:** Healthy")
+
+    # Unpack both graphs
+    diagnostic_tree_main, diagnostic_tree_iso = build_diagnostic_tree(G, violations_req, disconnected_req, impact_req)
+
+    # Create an asymmetrical side-by-side layout (Main gets 75% space, Orphans get 25%)
+    col_g1, col_g2 = st.columns([3, 1])
+
+    with col_g1:
+        st.write("**Main Assembly Pipeline**")
+        try:
+            st.graphviz_chart(diagnostic_tree_main, use_container_width=True)
+        except Exception as render_err:
+            st.error(f"Graphviz Rendering Engine Failed. Error details: {render_err}")
+
+    with col_g2:
+        st.write("**Disconnected Components**")
+        if disconnected_req:
+            try:
+                st.graphviz_chart(diagnostic_tree_iso, use_container_width=True)
+            except Exception as render_err:
+                st.error(f"Graphviz Rendering Engine Failed. Error details: {render_err}")
+        else:
+            st.success("No orphaned elements detected!")
+
+    st.divider()
+
+    st.subheader("Detailed Diagnostic Reports")
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.write("##### Process-Resource Allocation")
+        if violations_req:
+            formatted_v = [str(v).title() for v in violations_req]
+            st.error(f"Missing Resources for {len(formatted_v)} processes: {', '.join(formatted_v)}")
+        else:
+            st.success("All processes have resources correctly assigned.")
+
+        st.write("##### Network Connectivity")
+        if disconnected_req:
+            st.warning(f"Found {len(disconnected_req)} isolated network segments.")
+            for i, comp in enumerate(disconnected_req):
+                formatted_c = [str(name).title().replace("Nan", "NAN") for name in comp]
+                st.caption(f"Segment {i + 1}: {', '.join(formatted_c)}")
+        else:
+            st.success("System is fully connected.")
+
+    with col_b:
+        st.write("##### Downstream Impact Analysis")
+        if selected_fail != "-- None --":
+            if impact_req:
+                formatted_i = [str(i).title() for i in impact_req]
+                st.warning(f"Failure in '{selected_fail}' impacts {len(formatted_i)} nodes: {', '.join(formatted_i)}")
+            else:
+                st.info("No downstream impact detected. (End of the line)")
+        else:
+            st.info("Select a node above to simulate failure.")
+
+        st.write("##### Structural Similarity")
+        similar = find_similarly_structured_processes(G)
+        if similar:
+            for sig, nodes in similar.items():
+                formatted_n = [str(n).title() for n in nodes]
+                st.info(f"Structure [{sig.replace('_', ' ')}]: {', '.join(formatted_n)}")
+        else:
+            st.write("No structurally identical processes found.")
